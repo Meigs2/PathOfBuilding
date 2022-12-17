@@ -362,52 +362,64 @@ end
 function TradeQueryGeneratorClass:GenerateModWeights(modsToTest)
     local start = GetTime()
     for _, entry in pairs(modsToTest) do
-        if entry[self.calcContext.itemCategory] ~= nil then
-            if self.alreadyWeightedMods[entry.tradeMod.id] ~= nil then -- Don't calculate the same thing twice (can happen with corrupted vs implicit)
-                goto continue
-            elseif self.calcContext.options.includeTalisman == false and entry[self.calcContext.itemCategory].subType == "Talisman" then -- Talisman implicits take up a lot of query slots, so we have an option to skip them
-                goto continue
+        local result = CalculateModWeights(entry)
+
+        if result ~= nil then
+            for _, mod in pairs(result) do
+                if self.weightedMods[mod.tradeMod.id] == nil then
+                    self.weightedMods[mod.tradeMod.id] = mod
+                end
             end
-
-            -- Test with a value halfway between the min and max available for this mod in this slot. Note that this can generate slightly different values for the same mod as implicit vs explicit.
-            local modValue = math.ceil((entry[self.calcContext.itemCategory].max - entry[self.calcContext.itemCategory].min) / 2 + entry[self.calcContext.itemCategory].min)
-            local modValueStr = (entry.sign and entry.sign or "") .. tostring(modValue)
-
-            -- Apply override text for special cases
-            local modLine
-            if modValue == 1 and entry.specialCaseData.overrideModLineSingular ~= nil then
-                modLine = entry.specialCaseData.overrideModLineSingular
-            elseif entry.specialCaseData.overrideModLine ~= nil then
-                modLine = entry.specialCaseData.overrideModLine
-            else
-                modLine = entry.tradeMod.text
-            end
-            modLine = modLine:gsub("#",modValueStr)
-
-            self.calcContext.testItem.explicitModLines[1] = { line = modLine, custom = true }
-            self.calcContext.testItem:BuildAndParseRaw()
-
-            if (self.calcContext.testItem.modList ~= nil and #self.calcContext.testItem.modList == 0) or (self.calcContext.testItem.slotModList ~= nil and #self.calcContext.testItem.slotModList[1] == 0 and #self.calcContext.testItem.slotModList[2] == 0) then
-                logToFile("Failed to test %s mod: %s", self.calcContext.itemCategory, modLine)
-            end
-
-            local output = self.calcContext.calcFunc({ repSlotName = self.calcContext.slot.slotName, repItem = self.calcContext.testItem }, {})
-            local meanDPSDiff = (GlobalCache.useFullDPS and output.FullDPS or m_max(output.TotalDPS, m_max(output.TotalDot,output.CombinedAvg)) or 0) - (self.calcContext.baseDPS or 0)
-            if meanDPSDiff > 0.01 then
-                table.insert(self.modWeights, { tradeModId = entry.tradeMod.id, weight = meanDPSDiff / modValue, meanDPSDiff = meanDPSDiff, invert = entry.sign == "-" and true or false })
-                self.alreadyWeightedMods[entry.tradeMod.id] = true
-            end
-
-            local now = GetTime()
-			if now - start > 50 then
-                -- Would be nice to update x/y progress on the popup here, but getting y ahead of time has a cost, and the visual seems to update on a significant delay anyways so it's not very useful
-				coroutine.yield()
-				start = now
-			end
         end
-        ::continue::
+        
+        local now = GetTime()
+        if now - start > 50 then
+            -- Would be nice to update x/y progress on the popup here, but getting y ahead of time has a cost, and the visual seems to update on a significant delay anyways so it's not very useful
+            coroutine.yield()
+            start = now
+        end
     end
 end
+
+function CalculateModWeights(modifier)
+    if modifier[self.calcContext.itemCategory] ~= nil then
+        if self.weightedMods[modifier.tradeMod.id] ~= nil then -- Don't calculate the same thing twice (can happen with corrupted vs implicit)
+            return nil
+        elseif self.calcContext.options.includeTalisman == false and modifier[self.calcContext.itemCategory].subType == "Talisman" then -- Talisman implicits take up a lot of query slots, so we have an option to skip them
+            return nil
+        end
+
+        -- Test with a value halfway between the min and max available for this mod in this slot. Note that this can generate slightly different values for the same mod as implicit vs explicit.
+        local modValue = math.ceil((modifier[self.calcContext.itemCategory].max - modifier[self.calcContext.itemCategory].min) / 2 + modifier[self.calcContext.itemCategory].min)
+        local modValueStr = (modifier.sign and modifier.sign or "") .. tostring(modValue)
+
+        -- Apply override text for special cases
+        local modLine
+        if modValue == 1 and modifier.specialCaseData.overrideModLineSingular ~= nil then
+            modLine = modifier.specialCaseData.overrideModLineSingular
+        elseif modifier.specialCaseData.overrideModLine ~= nil then
+            modLine = modifier.specialCaseData.overrideModLine
+        else
+            modLine = modifier.tradeMod.text
+        end
+        modLine = modLine:gsub("#",modValueStr)
+
+        self.calcContext.testItem.explicitModLines[1] = { line = modLine, custom = true }
+        self.calcContext.testItem:BuildAndParseRaw()
+
+        if (self.calcContext.testItem.modList ~= nil and #self.calcContext.testItem.modList == 0) or (self.calcContext.testItem.slotModList ~= nil and #self.calcContext.testItem.slotModList[1] == 0 and #self.calcContext.testItem.slotModList[2] == 0) then
+            logToFile("Failed to test %s mod: %s", self.calcContext.itemCategory, modLine)
+        end
+
+        local output = self.calcContext.calcFunc({ repSlotName = self.calcContext.slot.slotName, repItem = self.calcContext.testItem }, {})
+        local meanDPSDiff = (GlobalCache.useFullDPS and output.FullDPS or m_max(output.TotalDPS, m_max(output.TotalDot,output.CombinedAvg)) or 0) - (self.calcContext.baseDPS or 0)
+        
+        if meanDPSDiff > 0.01 then
+            table.insert(self.modWeights, { tradeModId = modifier.tradeMod.id, weight = meanDPSDiff / modValue, meanDPSDiff = meanDPSDiff, invert = modifier.sign == "-" and true or false })
+            self.weightedMods[modifier.tradeMod.id] = true
+        end
+    end
+end 
 
 function TradeQueryGeneratorClass:OnFrame()
     if self.calcContext.co == nil then
@@ -516,7 +528,7 @@ function TradeQueryGeneratorClass:StartQuery(slot, options)
 
 	-- Test each mod one at a time and cache the normalized DPS diff to use as weight
     self.modWeights = { }
-    self.alreadyWeightedMods = { }
+    self.weightedMods = { }
 
     self.calcContext = {
         itemCategoryQueryStr = itemCategoryQueryStr,
